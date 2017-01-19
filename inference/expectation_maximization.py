@@ -2,163 +2,296 @@ from time import time
 from random import Random
 import numpy as np
 from model import *
+import matplotlib.pyplot as pl
 
 
-def expectation_maximization(data, model, keys_params, lower_bounds_params, upper_bounds_params, lower_bounds_states, upper_bounds_states,
-                             output_counter, n_particles=None, smoothing_lag=None, seed=time()):
-
-    # random number generator
-    random_generator = Random()
-    random_generator.seed(seed)
-
-    # adaptation parameters
-    a = 0.01
-    b = 0.01
-    c = 0.01
-
-    lower_bounds = lower_bounds_params + lower_bounds_states
-    upper_bounds = upper_bounds_params + upper_bounds_states
-
-    # number of particles
-    if n_particles is None:
-        n_particles = (1 + len(lower_bounds_params) + len(lower_bounds_states)) * 100
-
-    # sample initial states
-    Z0 = [map(lambda x: x * random_generator.random(), lower_bounds + (upper_bounds - lower_bounds)) for i in range(n_particles)]
-
-    # initial Q
-    param_cov0 = np.diag(upper_bounds - lower_bounds) * 1e-2  # TODO: why 1e-2???
-
-    # execute filter
-    if smoothing_lag is None or smoothing_lag <= 1:
-        Zavg, Q = sequential_monte_carlo_filter(update_states_, update_weights_, data, model, keys_params, Z0, param_cov0, output_counter,
-                                                random_generator)
-    else:
-        Zavg, Q = sequential_monte_carlo_filter_with_smoothing_lag(update_states_, update_weights_, smoothing_lag, data, model, keys_params,
-                                                                   Z0, param_cov0, output_counter, random_generator)
-
-    return Zavg, Q
+def get_random_matrix(random_generator, kind, m, n, args=[]):
+    mat = np.zeros((m, n))
+    for i in range(m):
+        for j in range(n):
+            mat[i, j] = getattr(random_generator, kind)(*args)
+    return mat
 
 
-def sequential_monte_carlo_filter(update_states, update_weights, data, model, keys_params, Z0, Q0, output_counter, random_generator):
 
-    n_timesteps = np.shape(data)[1]
-    n_params, n_particles = np.shape(Z0)
+class ExpectationMaximization:
 
-    # allocate memory
-    Zavg = np.zeros(n_params, n_timesteps)
+    def __init__(self, data, model, keys_params, lower_bounds_noise, upper_bounds_noise, lower_bounds_params, upper_bounds_params,
+                             lower_bounds_states, upper_bounds_states, adaptation_params, n_particles=None, smoothing_lag=None,
+                             seed=time(), output_counter=1000):
 
-    # initialize
-    Z = Z0
-    w = update_weights(timestep=0, data=data, Z=Z, w_old=np.ones(n_particles) / n_particles)
-    param_cov = Q0
+        self.data = data
+        self.model = model
+        self.keys_params = keys_params
 
-    Zavg[:, 0] = Z * w
+        # bounds
+        self.lower_bounds = np.array(lower_bounds_noise + lower_bounds_params + lower_bounds_states)
+        self.upper_bounds = np.array(upper_bounds_noise + upper_bounds_params + upper_bounds_states)
 
-    # main loop
-    for timestep in range(1, n_timesteps):
-        # re-sample if necessary
-        effective_n_particles = 1 / sum(w * w)
-        if effective_n_particles < n_particles / 2:
-            Z, w = resample_weights(Z, w, random_generator)
+        # adaptation parameters
+        self.a, self.b, self.c = adaptation_params
 
-        # propagate particles
-        Z, param_cov = update_states(timestep, data, Z, w, param_cov, random_generator)
-        w = update_weights(timestep, data, Z, w)
+        # number of particles
+        if n_particles is None:
+            n_particles = (1 + len(lower_bounds_params) + len(lower_bounds_states)) * 100
+        self.n_particles = n_particles
 
-        # normalize weights
-        w = w / sum(w)
-        if any(np.isnan(w)):  # check for NaN and act accordingly
-            w = 1 / n_particles
+        # smoothing lag
+        self.smoothing_lag = smoothing_lag
 
-        # compute statistics
-        Zavg[:, timestep] = Z * w
+        # random number generator
+        self.random_generator = Random()
+        self.random_generator.seed(seed)
 
-        # log progress
-        if timestep % output_counter == 0:
-            print 'Step '+str(timestep)+' of '+str(n_timesteps)
-    return Zavg, param_cov
+        # output counter
+        self.output_counter = output_counter
 
+        # to get indices for Z easier
+        n_noise = 3
+        n_params = len(keys_params)
+        n_gates = len(self.model.ionchannels)
+        self.to_idx = {'scale_factor': 0, 'std_noise_intrinsic': 1,'std_noise_observed': 2,
+                       'params': range(n_noise, n_noise+n_params), 'v': n_noise+n_params,
+                       'a_gates': range(n_noise+n_params+1, n_noise+n_params+1+n_gates),
+                       'b_gates': range(n_noise+n_params+1+n_gates, n_noise+n_params+1+2*n_gates)}
 
-def sequential_monte_carlo_filter_with_smoothing_lag():
-    pass
+        # figure
+        pl.ion()
+        f, self.ax = pl.subplots()
 
+    def run(self):
+        # sample initial states
+        Z0 = np.tile(np.array([self.lower_bounds + (self.upper_bounds - self.lower_bounds)]).T, (1, self.n_particles)) \
+             + get_random_matrix(self.random_generator, 'random', len(self.lower_bounds), self.n_particles)
 
-def update_states_(timestep, data, model, keys_params, Z, w, old_param_cov, lower_bounds, upper_bounds, a, b, c, idxs, random_generator):
-    # read data
-    t1 = data(1, timestep - 1)
-    t2 = data(1, timestep)
-    Iinj = data(2, timestep - 1)
+        # initial covariance matrix
+        idx_params = self.to_idx['params'] + [self.to_idx['std_noise_intrinsic']] + [self.to_idx['std_noise_observed']]
+        param_cov0 = np.diag(self.upper_bounds[idx_params] - self.lower_bounds[idx_params]) * 1e-2
 
-    # update scale factor
-    Z[1,:] = map(lambda x: x * np.exp(c * random_generator.gauss(0, 1)), Z[1, :])
-    Z[1, Z[1, :] < lower_bounds[1]] = lower_bounds[1]
-    Z[1, Z[1, :] > upper_bounds[1]] = upper_bounds[1]
-
-    # update parameters and states
-    if idxs is not None:
-        Z[idxs, :], old_param_cov = update_params(Z[idxs, :], Z[1, :], w, old_param_cov, lower_bounds(idxs), upper_bounds(idxs),
-                                                  a, b, random_generator)
-
-    for i in range(n_particles):
-        # update parameters in the model
-        for keys, value in zip(keys_params, values):
-            model.update_attr(keys, value)
-        v, a_gates, b_gates = update_voltage_and_gates(model, v, a_gates, b_gates, i_inj, dt, std_noise_intrinsic, random_generator)
-
-    return Z, old_param_cov
+        if self.smoothing_lag is None or self.smoothing_lag <= 1:
+            Zavg = self.sequential_monte_carlo_filter(Z0, param_cov0)
+        else:
+            Zavg = self.sequential_monte_carlo_filter_with_smoothing_lag(Z0, param_cov0)
+        return Zavg
 
 
-def update_weights_(time_step, data, Z, w_old):
-    v_observed = data(3, time_step)
-    std_noise_observed = Z[3, :]
-    v_inferred = Z[36, :]
+    def sequential_monte_carlo_filter(self, Z0, param_cov0):
 
-    # update weights
-    w = w_old * (np.exp(-0.5 * ((v_inferred - v_observed) / std_noise_observed) ** 2)
-                 / (np.sqrt(2.0 * np.pi) * std_noise_observed))
-    return w
+        n_timesteps = np.shape(self.data)[1]
+        len_z = np.shape(Z0)[0]
+
+        # allocate memory
+        Zavg = np.zeros((len_z, n_timesteps))
+
+        # initialize
+        Z = Z0
+        w = self.update_weights(timestep=0, Z=Z, w_old=np.ones(self.n_particles) / self.n_particles)
+        param_cov = param_cov0
+        Zavg[:, 0] = np.dot(Z, w)
+
+        # main loop
+        for timestep in range(1, n_timesteps):
+            # re-sample if necessary
+            effective_n_particles = 1 / sum(w * w)
+            if effective_n_particles < self.n_particles / 2:
+                Z, w = self.resample_weights(Z, w)
+
+            # propagate particles
+            Z, param_cov = self.update_states(timestep, Z, w, param_cov)
+            w = self.update_weights(timestep, Z, w)
+
+            # normalize weights
+            w = w / sum(w)
+            if any(np.isnan(w)):  # check for NaN and act accordingly
+                w = np.ones(self.n_particles) / self.n_particles
+
+            # compute statistics
+            Zavg[:, timestep] = np.dot(Z, w)
+
+            # log progress
+            if timestep % self.output_counter == 0:
+                print 'Step '+str(timestep)+' of '+str(n_timesteps)
+                x = np.squeeze(np.asarray(self.data[0, :timestep]))
+                y = np.squeeze(np.asarray(self.data[2, :timestep]))
+                self.ax.plot(x, y, 'k', label='v observed')
+                self.ax.plot(x, Zavg[self.to_idx['v'], :timestep], 'r', label='v inferred')
+                pl.draw()
+                pl.pause(0.0001)
+        pl.show(block=True)
+        return Zavg
 
 
-def resample_weights(Z, w, random_generator):
-    idxs = get_weight_indices(w, random_generator)
-    Z = Z[:, idxs]  # update Z
-    w = 1 / len(w) * np.ones(len(w))  # TODO: why now start again from uniform?!
-    return Z, w
+    def sequential_monte_carlo_filter_with_smoothing_lag(self, Z0, param_cov0):
 
+        n_timesteps = np.shape(self.data)[1]
+        len_z = np.shape(Z0)[0]
 
-def get_weight_indices(w, random_generator):
-    """
-    Sample len(w) new weights from weights according to the cumulative sum of the weights.
-    :param w: weight vector
-    :param random_generator: Random number generator.
-    :return: Indices of sampled weights.
-    """
-    cumsum_w = np.cumsum(w)
-    idxs = np.zeros(len(w))
-    for i in range(len(w)):
-        idx = 0
-        r = random_generator.random()
-        while cumsum_w[idx] < r:
-            idx += 1
-        idxs[i] = idx
-    return idxs
+        # allocate memory
+        Zavg = np.zeros((len_z, n_timesteps))
+        Z = np.zeros((len_z, self.n_particles, self.smoothing_lag))
+        w = np.zeros((self.n_particles, self.smoothing_lag))
 
+        # initialize
+        Z[:, :, 0] = Z0
+        w[:, 0] = self.update_weights(timestep=0, Z=Z[:, :, 0], w_old=np.ones((self.n_particles)) / self.n_particles)
+        param_cov = param_cov0
 
-def update_params(params, scale_factor, w, old_param_cov, lower_bounds_params, upper_bounds_params,
-                  a, b, random_generator):
-    # compute mean and covariance
-    params_mean = params * w
-    residuals = params - params_mean
-    params_cov = np.dot(residuals * w, residuals)
+        # filter first L data points
+        for timestep in range(1, self.smoothing_lag):
+            # read auxiliary variables
+            Z_ = Z[:, :, timestep - 1]
+            w_ = w[:, timestep - 1]
 
-    # compute new mean and covariance
-    new_param_mean = (1 - a) * params + a * params_mean
-    new_param_cov = (1 - b) * old_param_cov + b * params_cov
+            # re-sample if necessary
+            effective_n_particles = 1 / sum(w_ * w_)
+            if effective_n_particles < self.n_particles / 2:
+                Z_, w_ = self.resample_weights(Z_, w_)
 
-    # update parameters
-    randns = np.reshape([random_generator.gauss(0, 1) for i in range(np.size(scale_factor))], np.shape(scale_factor))
-    params = new_param_mean + np.linalg.cholesky(new_param_cov) * randns * scale_factor
-    params[params < lower_bounds_params] = lower_bounds_params
-    params[params > upper_bounds_params] = upper_bounds_params
-    return params, new_param_cov
+            # propagate particles
+            [Z_, param_cov] = self.update_states(timestep, Z_, w_, param_cov)
+            w_ = self.update_weights(timestep, Z_, w_)
+
+            # normalize weights
+            w_ = w_ / sum(w_)
+            if any(np.isnan(w_)):  # check for NaN and act accordingly
+                w_ = np.ones(self.n_particles) / self.n_particles
+
+            # update Z and w
+            Z[:, :, timestep] = Z_
+            w[:, timestep] = w_
+
+        # main loop
+        for timestep in range(self.smoothing_lag, n_timesteps):
+            # compute statistics
+            Zavg[:, timestep - self.smoothing_lag] = np.dot(Z[:, :, 0], w[:, 0])
+
+            # re-sample, if necessary
+            effective_n_particles = 1 / sum(w[:, self.smoothing_lag-1] * w[:, self.smoothing_lag-1])
+            if effective_n_particles < self.n_particles / 2:
+                Z, w = self.resample_weights_with_smoothing_lag(Z, w)  # resample whole trajectories
+
+            # read auxiliary variables
+            Z_ = Z[:, :, self.smoothing_lag-1]
+            w_ = w[:, self.smoothing_lag-1]
+
+            # propagate particles
+            Z_, param_cov = self.update_states(timestep, Z_, w_, param_cov)
+            w_ = self.update_weights(timestep, Z_, w_)
+
+            # normalise weights
+            w_ = w_ / sum(w_)
+            if any(np.isnan(w_)):  # check for NaN and act accordingly
+                w_ = np.ones(self.n_particles) / self.n_particles
+
+            # update storage
+            Z[:, :, :self.smoothing_lag-1] = Z[:, :, 1:self.smoothing_lag]
+            Z[:, :, self.smoothing_lag-1] = Z_
+            w[:, :self.smoothing_lag-1] = w[:, 1:self.smoothing_lag]
+            w[:, self.smoothing_lag-1] = w_
+
+            # log progress
+            if timestep % self.output_counter == 0:
+                print 'Step ' + str(timestep) + ' of ' + str(n_timesteps)
+                x = np.squeeze(np.asarray(self.data[0, :timestep - self.smoothing_lag]))
+                y = np.squeeze(np.asarray(self.data[2, :timestep - self.smoothing_lag]))
+                self.ax.plot(x, y, 'k', label='v observed')
+                self.ax.plot(x, Zavg[self.to_idx['v'], :timestep - self.smoothing_lag], 'r', label='v inferred')
+                pl.draw()
+                pl.pause(0.0001)
+        pl.show(block=True)
+        return Zavg
+
+    def update_weights(self, timestep, Z, w_old):
+        v_observed = self.data[2, timestep]
+        std_noise_observed = Z[self.to_idx['std_noise_observed'], :]
+        v_inferred = Z[self.to_idx['v'], :]
+
+        # update weights
+        w = w_old * (np.exp(-0.5 * ((v_inferred - v_observed) / std_noise_observed) ** 2)
+                     / (np.sqrt(2.0 * np.pi) * std_noise_observed))
+        return w
+
+    def update_states(self, timestep, Z, w, old_param_cov):
+
+        # update scale factor
+        Z[self.to_idx['scale_factor'], :] = map(lambda x: x * np.exp(self.c * self.random_generator.gauss(0, 1)),
+                                                Z[0, :])
+        Z = self.reduce_to_bounds(Z, self.to_idx['scale_factor'])
+
+        # update parameters and states
+        Z, old_param_cov = self.update_params(Z, w, old_param_cov)
+
+        for i in range(self.n_particles):
+            # update parameter in the model
+            values = Z[self.to_idx['params'], i]
+            for keys, value in zip(self.keys_params, values):
+                self.model.update_attr(keys, value)
+            v = Z[self.to_idx['v'], i]
+            a_gates = Z[self.to_idx['a_gates'], i]
+            b_gates = Z[self.to_idx['b_gates'], i]
+            i_inj = self.data[1, timestep]
+            dt = self.data[0, timestep] - self.data[0, timestep-1]
+            std_noise_intrinsic = Z[self.to_idx['std_noise_intrinsic'], i]
+            v, a_gates, b_gates = update_voltage_and_gates(self.model, v, a_gates, b_gates, i_inj, dt,
+                                                           std_noise_intrinsic, self.random_generator)
+            self.reduce_to_bounds(Z, self.to_idx['a_gates']+self.to_idx['b_gates'])
+            Z[self.to_idx['v'], i] = v
+            Z[self.to_idx['a_gates'], i] = a_gates
+            Z[self.to_idx['b_gates'], i] = b_gates
+
+        return Z, old_param_cov
+
+    def update_params(self, Z, w, old_param_cov):
+        idx_params = self.to_idx['params']+[self.to_idx['std_noise_intrinsic']]+[self.to_idx['std_noise_observed']]
+        params = Z[idx_params, :]
+        scale_factor = Z[self.to_idx['scale_factor'], :]
+
+        # compute mean and covariance
+        params_mean = np.dot(params, w)
+        residuals = (params.T - params_mean).T
+        params_cov = np.dot(residuals * w, residuals.T)
+
+        # compute new mean and covariance
+        new_param_mean = ((1 - self.a) * params.T + self.a * params_mean).T
+        new_param_cov = (1 - self.b) * old_param_cov + self.b * params_cov
+
+        # update parameters
+        randns = get_random_matrix(self.random_generator, 'gauss', len(params_mean), self.n_particles, [0, 1])
+        params = new_param_mean + np.dot(np.linalg.cholesky(new_param_cov), randns * scale_factor)
+        Z[idx_params, :] = params
+        Z = self.reduce_to_bounds(Z, idx_params)
+        return Z, new_param_cov
+
+    def resample_weights(self, Z, w):
+        idxs = self.get_weight_indices(w)
+        Z = Z[:, idxs]  # update Z
+        w = np.ones(len(w)) / len(w)   # TODO: why now start again from uniform?!
+        return Z, w
+
+    def resample_weights_with_smoothing_lag(self, Z, w):
+        idxs = self.get_weight_indices(w[:, -1])
+        Z = Z[:, idxs, :]
+        w[:, :] = 1 / np.shape(w)[0]
+        return Z, w
+
+    def get_weight_indices(self, w):
+        cumsum_w = np.cumsum(w)
+        idxs = np.zeros(len(w), dtype=int)
+        for i in range(len(w)):
+            idx = 0
+            r = self.random_generator.random()
+            while cumsum_w[idx] < r:
+                idx += 1
+            idxs[i] = idx
+        return idxs
+
+    def reduce_to_bounds(self, Z, idx):
+        Z_idx = Z[idx, :]
+        lower = (Z_idx.T < self.lower_bounds[idx]).T
+        upper = (Z_idx.T > self.upper_bounds[idx]).T
+        if lower.any():
+            Z_idx[lower] = (lower.T * self.lower_bounds[idx]).T[lower]
+        if upper.any():
+            Z_idx[upper] = (upper.T * self.upper_bounds[idx]).T[upper]
+        Z[idx, :] = Z_idx
+        return Z

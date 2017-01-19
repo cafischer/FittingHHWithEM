@@ -1,5 +1,5 @@
 import numpy as np
-from copy import copy
+import copy
 
 
 class Cell:
@@ -18,15 +18,30 @@ class Cell:
         return (-1 * np.sum(i_ion, 0) + i_inj) / cm  # (mV/ms)
 
     def update_attr(self, keys, value):
-        attr = reduce(lambda k: getattr(self, k), keys[:-1])
-        setattr(attr[keys[-1]], value)
+        keys = [self] + keys
+        attr_carrier = reduce(lambda o, k: self.get_attr(o, k), keys[:-1])
+        self.set_attr(attr_carrier, keys[-1], value)
+
+    def get_attr(self, x, key):
+        if key.isdigit():
+            return x[int(key)]
+        else:
+            return getattr(x, key)
+
+    def set_attr(self, x, key, value):
+        if isinstance(x, dict):
+            x[key] = value
+        elif key.isdigit():
+            x[int(key)] = value
+        else:
+            setattr(x, key, value)
 
 
 class IonChannel:
-    def __init__(self, g_max, equilibrium_potential, n_gates, power_gates, vh, vs, tau_min, tau_max, tau_delta):
+    def __init__(self, g_max, equilibrium_potential, power_gates,
+                 vh=None, vs=None, tau_min=None, tau_max=None, tau_delta=None):
         self.g_max = g_max  # (S/cm2)
         self.equilibrium_potential = equilibrium_potential  # name: str
-        self.n_gates = n_gates
         self.power_gates = np.array(power_gates)
         self.vh = vh
         self.vs = vs
@@ -34,37 +49,41 @@ class IonChannel:
         self.tau_max = tau_max
         self.tau_delta = tau_delta
 
-    def compute_current(self, vs, p_gates, equilibrium_potentials):
-        if self.n_gates == 0:
-            return self.g_max * (vs - equilibrium_potentials[self.equilibrium_potential])
-        else:
-            return self.g_max * np.prod(p_gates**self.power_gates) * (vs - equilibrium_potentials[self.equilibrium_potential])  # (mA/cm2)
+    def compute_current(self, v, p_gates, equilibrium_potentials):
+        return self.g_max * np.prod(p_gates**self.power_gates)\
+                * (v - equilibrium_potentials[self.equilibrium_potential])  # (mA/cm2)
 
     def init_gates(self, v0, p_gates0=None):
-        if p_gates0 is not None:
-            return p_gates0
-        else:
-            return self.inf_gates(v0)
+        p_gates = np.ones(2)
+        for i in [0, 1]:
+            if self.power_gates[i] == 0:
+                p_gates[i] = 1   # 1 is neutral element (gate totally open)
+            elif p_gates0 is not None:
+                p_gates[i] = p_gates0[i]
+            else:
+                p_gates[0] = self.inf_gates(v0, i)
+        return p_gates
 
     def derivative_gates(self, vs, p_gate):
-        inf_gates = self.inf_gates(vs)
-        tau_gates = self.tau_gates(vs, inf_gates)
-        return [(inf_gates[0] - p_gate[0]) / tau_gates[0],
-                (inf_gates[1] - p_gate[1]) / tau_gates[1]]
+        dgatesdt = np.zeros(2)
+        for i in [0, 1]:
+            if self.power_gates[i] == 0:
+                dgatesdt[i] = 0  # 0 neutral element (gate will stay totally open)
+            else:
+                inf_gate = self.inf_gates(vs, i)
+                tau_gate = self.tau_gates(vs, inf_gate, i)
+                dgatesdt[i] = (inf_gate - p_gate[i]) / tau_gate
+        return dgatesdt
 
-    def inf_gates(self, v):
-        return [1 / (1 + np.exp((self.vh[0] - v) / self.vs[0])),
-                1 / (1 + np.exp((self.vh[0] - v) / self.vs[0]))]
+    def inf_gates(self, v, i):
+        return 1 / (1 + np.exp((self.vh[i] - v) / self.vs[i]))
 
-    def tau_gates(self, v, inf_gates):
-        return [self.tau_min[0] + (self.tau_max[0] - self.tau_min[0]) * inf_gates[0]
-                * np.exp(self.tau_delta[0] * (self.vh[0] - v) / self.vs[0]),
-                self.tau_min[1] + (self.tau_max[1] - self.tau_min[1]) * inf_gates[1]
-                * np.exp(self.tau_delta[1] * (self.vh[1] - v) / self.vs[1])
-                ]
+    def tau_gates(self, v, inf_gate, i):
+        return self.tau_min[i] + (self.tau_max[i] - self.tau_min[i]) * inf_gate \
+                                 * np.exp(self.tau_delta[i] * (self.vh[i] - v) / self.vs[i])
 
 
-def simulate_cell(cell, t, i_inj, v0, p_gates0=None, std_noise_observed=1, std_noise_intrinsic=1,
+def simulate(cell, t, i_inj, v0, p_gates0=None, std_noise_observed=1, std_noise_intrinsic=1,
                   random_generator=None):
 
     # allocate memory
@@ -82,7 +101,7 @@ def simulate_cell(cell, t, i_inj, v0, p_gates0=None, std_noise_observed=1, std_n
     dt = np.diff(t)
     for ts in range(1, len(t)):
         v[ts], a_gates[:, ts], b_gates[:, ts] = update_voltage_and_gates(cell, v[ts],
-                                                                       a_gates[:, ts - 1], b_gates[:, ts - 1],
+                                                                         a_gates[:, ts - 1], b_gates[:, ts - 1],
                                                                          i_inj[ts - 1], dt[ts - 1],
                                                                          std_noise_intrinsic, random_generator)
         v_observed[ts] = v[ts] + std_noise_observed * random_generator.gauss(0, 1)
@@ -93,7 +112,7 @@ def simulate_cell(cell, t, i_inj, v0, p_gates0=None, std_noise_observed=1, std_n
 def update_voltage_and_gates(cell, v, a_gates, b_gates, i_inj, dt, std_noise_intrinsic, random_generator):
 
     # compute ionic current
-    i_ion = np.array([cell.ionchannels[i].compute_current(v, [a_gates[i], b_gates[i]])
+    i_ion = np.array([cell.ionchannels[i].compute_current(v, [a_gates[i], b_gates[i]], cell.equilibrium_potentials)
                       for i in range(len(cell.ionchannels))])
 
     # compute derivatives
@@ -105,7 +124,7 @@ def update_voltage_and_gates(cell, v, a_gates, b_gates, i_inj, dt, std_noise_int
 
     # update states
     v = v + dvdt * dt + std_noise_intrinsic * np.sqrt(dt) * random_generator.gauss(0, 1)
-    a_gates = a_gates + da_gatesdt * dt
-    b_gates = b_gates + db_gatesdt * dt
+    a_gates = a_gates + np.array(da_gatesdt) * dt
+    b_gates = b_gates + np.array(db_gatesdt) * dt
 
     return v, a_gates, b_gates
