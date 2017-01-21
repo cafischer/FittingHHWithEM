@@ -1,5 +1,3 @@
-from time import time
-from random import Random
 import numpy as np
 from model import *
 import matplotlib.pyplot as pl
@@ -21,7 +19,7 @@ class ExpectationMaximization:
 
     def __init__(self, data, model, keys_params, lower_bounds_noise, upper_bounds_noise, lower_bounds_params, upper_bounds_params,
                              lower_bounds_states, upper_bounds_states, adaptation_params, n_particles=None, smoothing_lag=None,
-                             seed=time(), output_counter=1000):
+                             seed=np.random.randint(0, 2**32 - 1), output_counter=1000):
 
         self.data = data
         self.model = model
@@ -43,8 +41,7 @@ class ExpectationMaximization:
         self.smoothing_lag = smoothing_lag
 
         # random number generator
-        self.random_generator = Random()
-        self.random_generator.seed(seed)
+        self.random_generator = np.random.RandomState(seed)
 
         # output counter
         self.output_counter = output_counter
@@ -66,7 +63,7 @@ class ExpectationMaximization:
         # sample initial states
         Z0 = np.tile(np.array([self.lower_bounds]).T, (1, self.n_particles)) \
                      + np.tile(np.array([self.upper_bounds - self.lower_bounds]).T, (1, self.n_particles)) \
-                     * get_random_matrix(self.random_generator, 'random', len(self.lower_bounds), self.n_particles) #TODO: all at upper bounds
+                     * self.random_generator.rand(len(self.lower_bounds), self.n_particles)
 
         # initial covariance matrix
         idx_params = self.to_idx['params'] + [self.to_idx['std_noise_intrinsic']] + [self.to_idx['std_noise_observed']]
@@ -202,6 +199,11 @@ class ExpectationMaximization:
                 pl.draw()
                 pl.pause(0.0001)
         pl.show(block=True)
+
+        # process last smoothing lag data points
+        for timestep in range(self.smoothing_lag):
+            Zavg[:, n_timesteps - self.smoothing_lag + timestep] = np.dot(Z[:, :, timestep], w[:, timestep])
+
         return Zavg
 
     def update_weights(self, timestep, Z, w_old):
@@ -217,23 +219,23 @@ class ExpectationMaximization:
     def update_states(self, timestep, Z, w, old_param_cov):
 
         # update scale factor
-        Z[self.to_idx['scale_factor'], :] = map(lambda x: x * np.exp(self.c * self.random_generator.gauss(0, 1)),
-                                                Z[0, :])
+        Z[self.to_idx['scale_factor'], :] = Z[self.to_idx['scale_factor'], :] \
+                                            * np.exp(self.c * self.random_generator.randn(1, self.n_particles))
         Z = self.reduce_to_bounds(Z, self.to_idx['scale_factor'])
 
         # update parameters and states
         Z, old_param_cov = self.update_params(Z, w, old_param_cov)
 
+        i_inj = self.data[1, timestep]
+        dt = self.data[0, timestep] - self.data[0, timestep - 1]
+
         for i in range(self.n_particles):
             # update parameter in the model
-            values = Z[self.to_idx['params'], i]
-            for keys, value in zip(self.keys_params, values):
+            for keys, value in zip(self.keys_params, Z[self.to_idx['params'], i]):
                 self.model.update_attr(keys, value)
             v = Z[self.to_idx['v'], i]
             a_gates = Z[self.to_idx['a_gates'], i]
             b_gates = Z[self.to_idx['b_gates'], i]
-            i_inj = self.data[1, timestep]
-            dt = self.data[0, timestep] - self.data[0, timestep-1]
             std_noise_intrinsic = Z[self.to_idx['std_noise_intrinsic'], i]
             v, a_gates, b_gates = update_voltage_and_gates(self.model, v, a_gates, b_gates, i_inj, dt,
                                                            std_noise_intrinsic, self.random_generator)
@@ -259,8 +261,8 @@ class ExpectationMaximization:
         new_param_cov = (1 - self.b) * old_param_cov + self.b * params_cov
 
         # update parameters
-        randns = get_random_matrix(self.random_generator, 'gauss', len(params_mean), self.n_particles, [0, 1])
-        params = new_param_mean + np.dot(np.linalg.cholesky(new_param_cov), randns * scale_factor)
+        params = new_param_mean + np.dot(np.linalg.cholesky(new_param_cov),
+                                         self.random_generator.randn(len(params_mean), self.n_particles) * scale_factor)
         Z[idx_params, :] = params
         Z = self.reduce_to_bounds(Z, idx_params)
         return Z, new_param_cov
@@ -268,7 +270,7 @@ class ExpectationMaximization:
     def resample_weights(self, Z, w):
         idxs = self.get_weight_indices(w)
         Z = Z[:, idxs]  # update Z
-        w = np.ones(len(w)) / len(w)   # TODO: why now start again from uniform?!
+        w = np.ones(self.n_particles) / self.n_particles   # TODO: why now start again from uniform?!
         return Z, w
 
     def resample_weights_with_smoothing_lag(self, Z, w):
@@ -293,9 +295,9 @@ class ExpectationMaximization:
         lower = (Z_idx.T < self.lower_bounds[idx]).T
         upper = (Z_idx.T > self.upper_bounds[idx]).T
         if lower.any():
-            Z_idx[lower] = (lower.T * self.lower_bounds[idx]).T[lower]
+            Z_idx[lower] = np.tile(np.array([self.lower_bounds]).T, (1, np.shape(Z)[1]))[lower]
         if upper.any():
-            Z_idx[upper] = (upper.T * self.upper_bounds[idx]).T[upper]
+            Z_idx[upper] = np.tile(np.array([self.upper_bounds]).T, (1, np.shape(Z)[1]))[upper]
         Z[idx, :] = Z_idx
         return Z
 

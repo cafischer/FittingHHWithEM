@@ -5,7 +5,7 @@ import matplotlib.pyplot as pl
 import pandas as pd
 
 # set seed
-seed = 1
+seed = 4
 random_generator = np.random.RandomState(seed)
 
 Zavg = np.loadtxt("./results/toymodel/Zavg.csv", delimiter=",")

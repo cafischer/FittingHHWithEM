@@ -107,7 +107,7 @@ def simulate(cell, t, i_inj, v0, p_gates0=None, std_noise_observed=1, std_noise_
                                                                          a_gates[:, ts - 1], b_gates[:, ts - 1],
                                                                          i_inj[ts - 1], dt[ts - 1],
                                                                          std_noise_intrinsic, random_generator)
-        v_observed[ts] = v[ts] + std_noise_observed * random_generator.randn()
+    v_observed = v + std_noise_observed * random_generator.randn(len(t))
 
     return v_observed, v, a_gates, b_gates
 

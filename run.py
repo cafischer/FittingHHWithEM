@@ -16,7 +16,7 @@ def get_lowerbound_upperbound_keys(variables):
 
 
 # parameter
-seed = 1.0
+seed = 1
 adaptation_params = [0.0, 0.0, 0.0] # c = 0.01
 n_particles = 900
 smoothing_lag = 0
