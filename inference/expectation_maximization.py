@@ -3,9 +3,12 @@ from random import Random
 import numpy as np
 from model import *
 import matplotlib.pyplot as pl
+import pickle
 
 
-def get_random_matrix(random_generator, kind, m, n, args=[]):
+def get_random_matrix(random_generator, kind, m, n, args=None):
+    if args is None:
+        args = []
     mat = np.zeros((m, n))
     for i in range(m):
         for j in range(n):
@@ -55,14 +58,15 @@ class ExpectationMaximization:
                        'a_gates': range(n_noise+n_params+1, n_noise+n_params+1+n_gates),
                        'b_gates': range(n_noise+n_params+1+n_gates, n_noise+n_params+1+2*n_gates)}
 
+    def run(self):
         # figure
         pl.ion()
         f, self.ax = pl.subplots()
 
-    def run(self):
         # sample initial states
-        Z0 = np.tile(np.array([self.lower_bounds + (self.upper_bounds - self.lower_bounds)]).T, (1, self.n_particles)) \
-             + get_random_matrix(self.random_generator, 'random', len(self.lower_bounds), self.n_particles)
+        Z0 = np.tile(np.array([self.lower_bounds]).T, (1, self.n_particles)) \
+                     + np.tile(np.array([self.upper_bounds - self.lower_bounds]).T, (1, self.n_particles)) \
+                     * get_random_matrix(self.random_generator, 'random', len(self.lower_bounds), self.n_particles) #TODO: all at upper bounds
 
         # initial covariance matrix
         idx_params = self.to_idx['params'] + [self.to_idx['std_noise_intrinsic']] + [self.to_idx['std_noise_observed']]
@@ -73,7 +77,6 @@ class ExpectationMaximization:
         else:
             Zavg = self.sequential_monte_carlo_filter_with_smoothing_lag(Z0, param_cov0)
         return Zavg
-
 
     def sequential_monte_carlo_filter(self, Z0, param_cov0):
 
@@ -295,3 +298,7 @@ class ExpectationMaximization:
             Z_idx[upper] = (upper.T * self.upper_bounds[idx]).T[upper]
         Z[idx, :] = Z_idx
         return Z
+
+    def save(self, save_dir):
+        with open(save_dir, 'w') as f:
+            pickle.dump(self, f)

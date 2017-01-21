@@ -11,10 +11,10 @@ class Cell:
         self.ionchannels = ionchannels  # list of IonChannels
         self.equilibrium_potentials = equilibrium_potentials  # dict (mV)
 
-    def derivative_v(self, i_ion, i_inj):
-        i_ion = copy.copy(i_ion) * self.cell_area  # (mA)
-        cm = self.cm * self.cell_area * 1e-3  # (mF)
-        i_inj *= 1e-6  # (mA)
+    def compute_dvdt(self, i_ion, i_inj):
+        i_ion = copy.copy(i_ion) #* self.cell_area  # (mA)
+        cm = self.cm * 1e-3 #* self.cell_area # (mF)
+        i_inj *= 1e-3 #1e-6  # (mA) TODO
         return (-1 * np.sum(i_ion, 0) + i_inj) / cm  # (mV/ms)
 
     def update_attr(self, keys, value):
@@ -64,7 +64,7 @@ class IonChannel:
                 p_gates[0] = self.inf_gates(v0, i)
         return p_gates
 
-    def derivative_gates(self, vs, p_gate):
+    def compute_dgatesdt(self, vs, p_gate):
         dgatesdt = np.zeros(2)
         for i in [0, 1]:
             if self.power_gates[i] == 0:
@@ -93,18 +93,21 @@ def simulate(cell, t, i_inj, v0, p_gates0=None, std_noise_observed=1, std_noise_
     b_gates = np.zeros((len(cell.ionchannels), len(t)))
 
     # initial conditions
+    if p_gates0 is None:
+        p_gates0 = [None, None, None]
     v[0] = v0
-    a_gates[:, 0] = [cell.ionchannels[i].init_gates(v0, p_gates0)[0] for i in range(len(cell.ionchannels))]
-    b_gates[:, 0] = [cell.ionchannels[i].init_gates(v0, p_gates0)[1] for i in range(len(cell.ionchannels))]
+    v_observed[0] = v0
+    a_gates[:, 0] = [cell.ionchannels[i].init_gates(v0, p_gates0[i])[0] for i in range(len(cell.ionchannels))]
+    b_gates[:, 0] = [cell.ionchannels[i].init_gates(v0, p_gates0[i])[1] for i in range(len(cell.ionchannels))]
 
     # solve differential equation
     dt = np.diff(t)
     for ts in range(1, len(t)):
-        v[ts], a_gates[:, ts], b_gates[:, ts] = update_voltage_and_gates(cell, v[ts],
+        v[ts], a_gates[:, ts], b_gates[:, ts] = update_voltage_and_gates(cell, v[ts - 1],
                                                                          a_gates[:, ts - 1], b_gates[:, ts - 1],
                                                                          i_inj[ts - 1], dt[ts - 1],
                                                                          std_noise_intrinsic, random_generator)
-        v_observed[ts] = v[ts] + std_noise_observed * random_generator.gauss(0, 1)
+        v_observed[ts] = v[ts] + std_noise_observed * random_generator.randn()
 
     return v_observed, v, a_gates, b_gates
 
@@ -116,14 +119,14 @@ def update_voltage_and_gates(cell, v, a_gates, b_gates, i_inj, dt, std_noise_int
                       for i in range(len(cell.ionchannels))])
 
     # compute derivatives
-    dvdt = cell.derivative_v(i_ion, i_inj)
-    dgatesdt = [cell.ionchannels[i].derivative_gates(v, [a_gates[i], b_gates[i]])
+    dvdt = cell.compute_dvdt(i_ion, i_inj)
+    dgatesdt = [cell.ionchannels[i].compute_dgatesdt(v, [a_gates[i], b_gates[i]])
             for i in range(len(cell.ionchannels))]
 
     da_gatesdt, db_gatesdt = map(list, zip(*dgatesdt))  # transpose list to divide between a_gates and b_gates
 
     # update states
-    v = v + dvdt * dt + std_noise_intrinsic * np.sqrt(dt) * random_generator.gauss(0, 1)
+    v = v + dvdt * dt + std_noise_intrinsic * np.sqrt(dt) * random_generator.randn()
     a_gates = a_gates + np.array(da_gatesdt) * dt
     b_gates = b_gates + np.array(db_gatesdt) * dt
 

@@ -17,14 +17,14 @@ def get_lowerbound_upperbound_keys(variables):
 
 # parameter
 seed = 1.0
-adaptation_params = [0.01, 0.01, 0.01]
+adaptation_params = [0.0, 0.0, 0.0] # c = 0.01
 n_particles = 900
-smoothing_lag = 100
+smoothing_lag = 0
 output_counter = 100
 
 # read data
 #exp_data = pd.read_csv('./data/2015_08_26b/rampIV/3.0(nA).csv')
-exp_data = pd.read_csv('./data/toymodel/data.csv')
+exp_data = pd.read_csv('./data/toymodel/data2.csv')
 i_inj = exp_data.i.values
 t = exp_data.t.values
 v_observed = exp_data.v.values
@@ -40,11 +40,11 @@ cm = 1
 length = 100
 diam = 50
 equilibrium_potentials = {'eleak': -54.4, 'ena': 55, 'ek': -77}
-leak_channel = IonChannel(g_max=0.003, equilibrium_potential='eleak', power_gates=[0, 0])
-na_channel = IonChannel(g_max=1.2, equilibrium_potential='ena', power_gates=[3, 1],
+leak_channel = IonChannel(g_max=0.0003, equilibrium_potential='eleak', power_gates=[0, 0])
+na_channel = IonChannel(g_max=0.12, equilibrium_potential='ena', power_gates=[3, 1],
                         vh=[-39.6051, -62.1596], vs=[9.4690, -7.0678],
                         tau_min=[0.0093, 0.4012], tau_max=[1.0262, 16.0834], tau_delta=[0.4464, 0.3719])
-k_channel = IonChannel(g_max=0.36, equilibrium_potential='ek', power_gates=[1, 0],
+k_channel = IonChannel(g_max=0.036, equilibrium_potential='ek', power_gates=[4, 0],
                        vh=[-51.4643, None], vs=[16.4318, None],
                        tau_min=[0.5235, None], tau_max=[8.9236, None], tau_delta=[0.7980, None])
 ionchannels = [leak_channel, na_channel, k_channel]
@@ -84,10 +84,10 @@ lower_bounds_params, upper_bounds_params, keys_params = get_lowerbound_upperboun
 
 # define bounds of initial v and gates
 n_gates = 2 * len(model.ionchannels)
-lower_bounds_states = [-70] + [1, 0, 0, 1, 0, 1]  # put unused gates to 1, 1
-upper_bounds_states = [-60] + [1, 1, 1, 1, 1, 1]
-lower_bounds_noise = [0.15, 0, 0.01]  # TODO: put bounds stuff outside?
-upper_bounds_noise = [10, 10, 10]
+lower_bounds_states = [v_observed[0]] + [1, 0, 0, 1, 0, 1]  # put unused gates to 1, 1
+upper_bounds_states = [v_observed[0]] + [1, 1, 1, 1, 1, 1]
+lower_bounds_noise = [1, 0, 0.0001]  # 0.15
+upper_bounds_noise = [1, 10, 10]  # 10
 
 EM = ExpectationMaximization(data, model, keys_params,
                              lower_bounds_noise, upper_bounds_noise,
@@ -95,6 +95,7 @@ EM = ExpectationMaximization(data, model, keys_params,
                              lower_bounds_states, upper_bounds_states,
                              adaptation_params, n_particles, smoothing_lag,
                              seed, output_counter)
+EM.save('./results/toymodel/EM')
 Zavg = EM.run()
 
 Zavg = Zavg[:, -1]
@@ -116,4 +117,4 @@ pl.figure()
 pl.plot(t, v_observed, 'k', label='V observed')
 pl.plot(t, v_fit, 'r', label='V fit')
 pl.legend()
-pl.show()
+pl.show(block=True)
